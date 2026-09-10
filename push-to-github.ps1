@@ -26,7 +26,7 @@ if (-not $remote) {
   git remote set-url origin $repo
 }
 
-git add scripts/process-data.js scripts/generate-data.ps1 src/dataProcessor.js src/Dashboard.jsx src/data.js .gitignore
+git add -A
 git status
 
 $status = git status --porcelain
