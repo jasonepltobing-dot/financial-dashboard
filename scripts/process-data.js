@@ -13,6 +13,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const CSV_PATH = process.argv[2]
   ?? path.join(__dirname, '../public/cleaned_data.csv');
+const SOURCE_LABEL = process.argv[3] ?? path.basename(CSV_PATH);
 
 const OUT_PATH = path.join(__dirname, '../src/data.js');
 
@@ -20,7 +21,7 @@ const raw = fs.readFileSync(CSV_PATH, 'utf8');
 const data = processCSV(raw);
 
 const output = `// AUTO-GENERATED — do not edit manually
-// Source: ${path.basename(CSV_PATH)}
+// Source: ${SOURCE_LABEL}
 // Year: 2026 only · Tag: Run-rate > Pre-closing > Actual > Forecast
 // Run \`node scripts/process-data.js\` to regenerate
 
@@ -48,7 +49,7 @@ export const SEGMENTS = ${JSON.stringify(data.SEGMENTS, null, 2)};
 
 export const KPIS = ${JSON.stringify(data.KPIS, null, 2)};
 
-export const DATA_SOURCE = ${JSON.stringify(path.basename(CSV_PATH))};
+export const DATA_SOURCE = ${JSON.stringify(SOURCE_LABEL)};
 `;
 
 fs.writeFileSync(OUT_PATH, output, 'utf8');

@@ -1,5 +1,11 @@
 {
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
-  "framework": "vite"
+  "framework": "vite",
+  "rewrites": [
+    {
+      "source": "/api/sheet",
+      "destination": "https://docs.google.com/spreadsheets/d/1KKuhEQjb6X2RpvwluT4TeTayDK6ocur51YPWKlSUpN8/gviz/tq?tqx=out:csv&gid=0"
+    }
+  ]
 }

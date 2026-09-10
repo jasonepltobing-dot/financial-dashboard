@@ -88,28 +88,35 @@ function parseNumber(raw) {
 function parseRows(csvText) {
   const lines = csvText.replace(/\r/g, '').split('\n');
   const rows = [];
+  const header = parseCSVLine((lines[0] || '').replace(/^\uFEFF/, ''));
+  const sourceOffset = header[0] === 'Source Sheet' ? 1 : 0;
 
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line || line.startsWith('Selected Month')) break;
 
     const cols = parseCSVLine(line);
-    if (cols.length < 8) continue;
+    if (cols.length < 8 + sourceOffset) continue;
 
-    const year = cols[0]?.trim();
-    const month = cols[1]?.trim();
-    const segment = cols[2]?.trim();
-    const subSegment = cols[3]?.trim();
-    const category = cols[4]?.trim() ?? '';
-    const subcat = cols[5]?.trim();
-    const tag = cols[6]?.trim() ?? '';
-    const amtStr = cols[7]?.trim();
-    const diffStr = cols[9]?.trim() ?? '';
-    const diffYtdStr = cols[10]?.trim() ?? '';
+    if (sourceOffset) {
+      const sheet = cols[0]?.trim();
+      // Duplicate workbook tabs (e.g. "Copy of Sheet1") would double every figure.
+      if (sheet && sheet !== 'Sheet1') continue;
+    }
+
+    const year = cols[0 + sourceOffset]?.trim();
+    const month = cols[1 + sourceOffset]?.trim();
+    const segment = cols[2 + sourceOffset]?.trim();
+    const subSegment = cols[3 + sourceOffset]?.trim();
+    const category = cols[4 + sourceOffset]?.trim() ?? '';
+    const subcat = cols[5 + sourceOffset]?.trim();
+    const tag = cols[6 + sourceOffset]?.trim() ?? '';
+    const amtStr = cols[7 + sourceOffset]?.trim();
+    const diffStr = cols[9 + sourceOffset]?.trim() ?? '';
+    const diffYtdStr = cols[10 + sourceOffset]?.trim() ?? '';
 
     const yearNum = year == null ? NaN : parseInt(String(year).replace(/\.0+$/, ''), 10);
-    // Keep current FY + prior FY (for vs Last Year). Difference MoM uses current FY.
-    if (!Number.isFinite(yearNum) || (yearNum !== DATA_YEAR && yearNum !== PRIOR_YEAR)) continue;
+    if (!Number.isFinite(yearNum)) continue;
     if (!month || !subcat || !amtStr) continue;
 
     const amount = parseNumber(amtStr);
@@ -825,16 +832,50 @@ const SUBSEGMENT_SUBCATS = {
   'Net Income': 'Net Income',
 };
 
-export function processCSV(csvText) {
-  const allRows = parseRows(csvText);
-  const rows2026 = allRows.filter((r) => r.year === DATA_YEAR);
-  const rows2025 = allRows.filter((r) => r.year === PRIOR_YEAR);
-  if (rows2026.length === 0) throw new Error('No 2026 data found in the CSV file');
+function monthlyHasFigures(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return false;
+  return arr.some((m) => (
+    (m.Revenue || 0) || (m.CM || 0) || (m.EBITDA || 0) || (m.EBIT || 0) || (m.NetIncome || 0)
+  ));
+}
 
-  const primaryRows = pickPrimaryRows(rows2026);
-  const priorRows = pickPrimaryRows(rows2025);
-  const pnlSourceRows = rowsForPnL(rows2026);
-  const budgetRows = rows2026.filter((r) => r.tag === 'Budget');
+function mergeMonthlySeries(seriesList) {
+  const byMonth = new Map();
+  for (const series of seriesList) {
+    for (const row of series || []) {
+      const existing = byMonth.get(row.monthNum);
+      if (!existing) {
+        byMonth.set(row.monthNum, { ...row });
+        continue;
+      }
+      for (const metric of FULL_METRICS) {
+        const d = METRIC_DEFS[metric];
+        if (!d) continue;
+        existing[d.field] = (existing[d.field] || 0) + (row[d.field] || 0);
+        existing[d.budget] = (existing[d.budget] || 0) + (row[d.budget] || 0);
+        existing[d.diff] = (existing[d.diff] || 0) + (row[d.diff] || 0);
+        existing[d.vsBudget] = (existing[d.vsBudget] || 0) + (row[d.vsBudget] || 0);
+      }
+    }
+  }
+  return [...byMonth.values()].sort((a, b) => a.monthNum - b.monthNum);
+}
+
+export function processCSV(csvText) {
+  const parsedRows = parseRows(csvText);
+  const years = [...new Set(parsedRows.map((r) => r.year))].sort((a, b) => a - b);
+  if (years.length === 0) throw new Error('No data rows found in the spreadsheet');
+
+  const dataYear = years.includes(DATA_YEAR) ? DATA_YEAR : years[years.length - 1];
+  const priorYear = dataYear - 1;
+  const rowsCurrent = parsedRows.filter((r) => r.year === dataYear);
+  const rowsPrior = parsedRows.filter((r) => r.year === priorYear);
+  if (rowsCurrent.length === 0) throw new Error(`No ${dataYear} data found in the spreadsheet`);
+
+  const primaryRows = pickPrimaryRows(rowsCurrent);
+  const priorRows = pickPrimaryRows(rowsPrior);
+  const pnlSourceRows = rowsForPnL(rowsCurrent);
+  const budgetRows = rowsCurrent.filter((r) => r.tag === 'Budget');
 
   const buildDashboardMonthly = (scope, category, ebitdaVariant = 'Adj. EBITDA (Total)', ebitVariant = 'Adj. EBIT (Total)') =>
     aggregateMonthly(primaryRows, budgetRows, { ...scope, category, requireCategory: true }, {
@@ -931,13 +972,31 @@ export function processCSV(csvText) {
     };
   }
 
+  // Test / partial sheets often have no Dashboard / Before Elim rows.
+  // Fall back to summing available sub-segment metrics as-is.
+  if (!monthlyHasFigures(MONTHLY['Before Elim'])) {
+    const fallback = mergeMonthlySeries(SEGMENTS.map((seg) => SUBSEGMENT_MONTHLY[seg]?._all));
+    MONTHLY['Before Elim'] = fallback;
+    if (!monthlyHasFigures(MONTHLY['After Elim'])) MONTHLY['After Elim'] = fallback;
+    for (const seg of SEGMENTS) {
+      const subAll = SUBSEGMENT_MONTHLY[seg]?._all ?? [];
+      if (!monthlyHasFigures(SEGMENT_MONTHLY[seg]?.['Before Elim'])) {
+        SEGMENT_MONTHLY[seg]['Before Elim'] = subAll;
+      }
+      if (!monthlyHasFigures(SEGMENT_MONTHLY[seg]?.['After Elim'])) {
+        SEGMENT_MONTHLY[seg]['After Elim'] = subAll;
+      }
+    }
+  }
+
   const KPIS = {
-    revenue: MONTHLY['Before Elim'].reduce((s, m) => s + m.Revenue, 0),
-    adjEbitda: MONTHLY['Before Elim'].reduce((s, m) => s + m.EBITDA, 0),
-    netIncome: MONTHLY['Before Elim'].reduce((s, m) => s + m.NetIncome, 0),
+    revenue: MONTHLY['Before Elim'].reduce((s, m) => s + (m.Revenue || 0), 0),
+    adjEbitda: MONTHLY['Before Elim'].reduce((s, m) => s + (m.EBITDA || 0), 0),
+    netIncome: MONTHLY['Before Elim'].reduce((s, m) => s + (m.NetIncome || 0), 0),
   };
 
   return {
+    DATA_YEAR: dataYear,
     MONTHLY,
     MONTHLY_VARIANTS,
     SEGMENT_MONTHLY,

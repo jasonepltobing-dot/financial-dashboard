@@ -5,6 +5,7 @@ import {
 } from 'recharts';
 import * as DEFAULT_DATA from './data.js';
 import { processCSV, SEGMENTS as ALL_SEGMENTS, PNL_LINES_DIRECT, PNL_LINES_TOTAL } from './dataProcessor.js';
+import { fetchSheetCsv, SHEET_URL } from './sheets.js';
 
 /* ─── Theme ─────────────────────────────────────────────────────────── */
 const ThemeCtx = createContext({ theme: 'dark', toggle: () => {} });
@@ -48,15 +49,35 @@ function DataProvider({ children }) {
   const [activeId, setActiveId] = useState(() => localStorage.getItem(ACTIVE_KEY) ?? 'default');
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState(null);
+  const [liveData, setLiveData] = useState(null);
+  const [sheetStatus, setSheetStatus] = useState('loading');
+  const [sheetError, setSheetError] = useState(null);
+
+  const loadSheet = useCallback(async () => {
+    setSheetStatus('loading');
+    setSheetError(null);
+    try {
+      const csv = await fetchSheetCsv();
+      const result = processCSV(csv);
+      result.DATA_SOURCE = 'Google Sheets (live)';
+      setLiveData(result);
+      setSheetStatus('live');
+    } catch (err) {
+      setSheetError(err.message || String(err));
+      setSheetStatus('error');
+    }
+  }, []);
+
+  useEffect(() => { loadSheet(); }, [loadSheet]);
 
   const activeData = useMemo(() => {
-    if (activeId === 'default') return { ...DEFAULT_DATA };
+    if (activeId === 'default') return liveData ?? { ...DEFAULT_DATA };
     try {
       const raw = localStorage.getItem(dsKey(activeId));
       if (raw) return JSON.parse(raw);
     } catch {}
-    return { ...DEFAULT_DATA };
-  }, [activeId]);
+    return liveData ?? { ...DEFAULT_DATA };
+  }, [activeId, liveData]);
 
   const uploadCSV = useCallback((file) => {
     setUploading(true);
@@ -115,6 +136,7 @@ function DataProvider({ children }) {
       activeData, activeId, activeMeta, index, isCustom,
       uploading, uploadError,
       uploadCSV, switchDataset, removeDataset, dismissError,
+      sheetStatus, sheetError, loadSheet, sheetUrl: SHEET_URL, liveReady: !!liveData,
     }}>
       {children}
     </DataCtx.Provider>
@@ -436,7 +458,7 @@ function ThemeToggle() {
 }
 
 function DataManager() {
-  const { activeId, index, uploading, uploadError, uploadCSV, switchDataset, removeDataset, dismissError } = useDataCtx();
+  const { activeId, index, uploading, uploadError, uploadCSV, switchDataset, removeDataset, dismissError, sheetStatus, loadSheet } = useDataCtx();
   const [open, setOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const panelRef = useRef(null);
@@ -471,12 +493,18 @@ function DataManager() {
           onDrop={e => { e.preventDefault(); setDragging(false); handleFile(e.dataTransfer.files[0]); }}
           onDragOver={e => { e.preventDefault(); setDragging(true); }}
           onDragLeave={() => setDragging(false)}>
-          <div className="flex items-center justify-between px-4 py-3.5 border-b border-[var(--border-default)]">
+          <div className="flex items-center justify-between gap-2 px-4 py-3.5 border-b border-[var(--border-default)]">
             <p className="text-sm font-semibold text-[var(--text-primary)]">Data Library</p>
+            <div className="flex gap-1.5 shrink-0">
+            <button onClick={() => loadSheet()} disabled={sheetStatus === 'loading'}
+              className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-[var(--surface-elevated)] text-[var(--text-secondary)] border border-[var(--border-default)] cursor-pointer disabled:opacity-50">
+              {sheetStatus === 'loading' ? 'Syncing…' : 'Refresh Sheet'}
+            </button>
             <button onClick={() => inputRef.current?.click()} disabled={uploading}
               className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium bg-blue-600 text-white cursor-pointer disabled:opacity-50">
               {uploading ? 'Processing...' : 'Upload CSV'}
             </button>
+            </div>
             <input ref={inputRef} type="file" accept=".csv" className="hidden"
               onChange={e => { handleFile(e.target.files[0]); e.target.value = ''; }} />
           </div>
@@ -492,7 +520,7 @@ function DataManager() {
             </div>
           )}
           <div className="max-h-[300px] overflow-y-auto">
-            <DatasetRow filename="Default Data" subtitle={DEFAULT_DATA.DATA_SOURCE || 'cleaned_data.csv'} isActive={activeId === 'default'}
+            <DatasetRow filename="Google Sheets (live)" subtitle={sheetStatus === 'live' ? 'Connected' : sheetStatus === 'loading' ? 'Connecting…' : 'Using last fallback'} isActive={activeId === 'default'}
               onSelect={() => { switchDataset('default'); setOpen(false); }} />
             {[...index].reverse().map(entry => (
               <DatasetRow key={entry.id} filename={entry.filename} subtitle={relativeDate(entry.uploadedAt)}
@@ -603,7 +631,7 @@ function FilterBar({
   quarter, months, onChange, onReset, isActive,
   subSegmentsSelected, subSegments, onSubSegmentsChange, showSubSegment,
   category, onCategoryChange, showCategory = true, dataStatus,
-  amountFormat, onAmountFormatChange,
+  amountFormat, onAmountFormatChange, dataYear = 2026,
 }) {
   const Pill = ({ active, onClick, children }) => (
     <button onClick={onClick}
@@ -616,7 +644,7 @@ function FilterBar({
 
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3.5 bg-[var(--surface-card)] border border-[var(--border-default)] rounded-xl card-shadow">
-      <span className="text-[11px] uppercase tracking-widest text-[var(--text-very-faint)] font-medium">FY 2026</span>
+      <span className="text-[11px] uppercase tracking-widest text-[var(--text-very-faint)] font-medium">FY {dataYear}</span>
       <div className="h-4 w-px bg-[var(--border-default)]" />
       <div className="flex gap-1.5">
         {['all', 'Q1', 'Q2', 'Q3', 'Q4'].map(q => (
@@ -1000,7 +1028,7 @@ export default function Dashboard() {
 
 function DashboardInner() {
   const { theme } = useTheme();
-  const { activeData, activeMeta, isCustom } = useDataCtx();
+  const { activeData, activeMeta, isCustom, sheetStatus, sheetError, sheetUrl, liveReady } = useDataCtx();
   const c = CHART[theme];
 
   const [page, setPage] = useState('consolidated');
@@ -1458,7 +1486,8 @@ function DashboardInner() {
   const pageTitle = page === 'consolidated' ? 'FP&A Financial Dashboard' : `${page} Segment`;
   const dataSourceLabel = isCustom && activeMeta
     ? activeMeta.filename
-    : (activeData.DATA_SOURCE || DEFAULT_DATA.DATA_SOURCE || 'cleaned_data.csv');
+    : (activeData.DATA_SOURCE || 'Google Sheets (live)');
+  const fyYear = activeData.DATA_YEAR ?? 2026;
 
   const tableHeaders = useMemo(() => {
     const cols = ['Period', 'Tag'];
@@ -1479,7 +1508,7 @@ function DashboardInner() {
             <p className="text-[11px] uppercase tracking-widest text-[var(--text-very-faint)] mb-1">Executive Dashboard</p>
             <h1 className="text-2xl font-semibold tracking-tight text-[var(--text-primary)] truncate">{pageTitle}</h1>
             {isSegmentPage && (
-              <p className="text-[var(--text-faint)] text-sm mt-1">FY 2026</p>
+              <p className="text-[var(--text-faint)] text-sm mt-1">FY {activeData.DATA_YEAR ?? 2026}</p>
             )}
           </div>
         </div>
@@ -1507,9 +1536,31 @@ function DashboardInner() {
         amountFormat={amountFormat}
         onAmountFormatChange={setAmountFormat}
         dataStatus={dataStatus}
+        dataYear={fyYear}
       />
 
-      {/* KPI Cards */}
+      {!isCustom && (
+        <div className={`mt-3 px-4 py-2.5 rounded-xl text-xs border ${
+          sheetStatus === 'live' ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+            : sheetStatus === 'loading' ? 'bg-blue-500/10 border-blue-500/30 text-blue-400'
+              : 'bg-red-500/10 border-red-500/30 text-red-400'
+        }`}>
+          {sheetStatus === 'loading' && 'Connecting to Google Sheets…'}
+          {sheetStatus === 'live' && (
+            <>
+              Connected to Google Sheets (as-is).{' '}
+              <a href={sheetUrl} target="_blank" rel="noreferrer" className="underline underline-offset-2">Open spreadsheet</a>
+            </>
+          )}
+          {sheetStatus === 'error' && `Sheet error: ${sheetError}. Showing bundled data until reconnect.`}
+        </div>
+      )}
+
+      {!isCustom && sheetStatus === 'loading' && !liveReady && (
+        <div className="mt-5 px-5 py-10 text-center text-sm text-blue-400 bg-[var(--surface-card)] border border-[var(--border-default)] rounded-2xl">
+          Connecting to Google Sheets…
+        </div>
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-5 mb-5">
         {kpiFields.map(f => {
           const isEbitdaCard = f.key === 'ebitda' && showEbitdaVariant;
@@ -1781,7 +1832,12 @@ function DashboardInner() {
       />
 
       <footer className="mt-8 flex flex-col sm:flex-row justify-between items-center gap-2 text-[11px] text-[var(--text-very-faint)]">
-        <span>Source: {dataSourceLabel} · Values in IDR</span>
+        <span>
+          Source: {dataSourceLabel} · Values in IDR
+          {!isCustom && sheetUrl && (
+            <> · <a href={sheetUrl} target="_blank" rel="noreferrer" className="underline underline-offset-2">spreadsheet</a></>
+          )}
+        </span>
         <span>{new Date().toLocaleDateString('en-US', { day: 'numeric', month: 'long', year: 'numeric' })}</span>
       </footer>
     </div>
