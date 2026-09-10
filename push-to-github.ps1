@@ -1,9 +1,9 @@
-# Push perubahan ke https://github.com/arieffadlha-ux/financial-dashboard
+# Push perubahan ke https://github.com/jasonepltobing-dot/financial-dashboard
 # Jalankan setelah Git terinstall. Buka PowerShell di folder ini lalu:
 #   powershell -ExecutionPolicy Bypass -File .\push-to-github.ps1
 
 $ErrorActionPreference = 'Stop'
-$repo = "https://github.com/arieffadlha-ux/financial-dashboard.git"
+$repo = "https://github.com/jasonepltobing-dot/financial-dashboard.git"
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
   Write-Host "Git belum terinstall." -ForegroundColor Red
