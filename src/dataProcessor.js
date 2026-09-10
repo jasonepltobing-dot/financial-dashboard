@@ -88,24 +88,32 @@ function parseNumber(raw) {
 function parseRows(csvText) {
   const lines = csvText.replace(/\r/g, '').split('\n');
   const rows = [];
+  const header = parseCSVLine((lines[0] || '').replace(/^\uFEFF/, ''));
+  const sourceOffset = header[0] === 'Source Sheet' ? 1 : 0;
 
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line || line.startsWith('Selected Month')) break;
 
     const cols = parseCSVLine(line);
-    if (cols.length < 8) continue;
+    if (cols.length < 8 + sourceOffset) continue;
 
-    const year = cols[0]?.trim();
-    const month = cols[1]?.trim();
-    const segment = cols[2]?.trim();
-    const subSegment = cols[3]?.trim();
-    const category = cols[4]?.trim() ?? '';
-    const subcat = cols[5]?.trim();
-    const tag = cols[6]?.trim() ?? '';
-    const amtStr = cols[7]?.trim();
-    const diffStr = cols[9]?.trim() ?? '';
-    const diffYtdStr = cols[10]?.trim() ?? '';
+    if (sourceOffset) {
+      const sheet = cols[0]?.trim();
+      // Duplicate workbook tabs (e.g. "Copy of Sheet1") would double every figure.
+      if (sheet && sheet !== 'Sheet1') continue;
+    }
+
+    const year = cols[0 + sourceOffset]?.trim();
+    const month = cols[1 + sourceOffset]?.trim();
+    const segment = cols[2 + sourceOffset]?.trim();
+    const subSegment = cols[3 + sourceOffset]?.trim();
+    const category = cols[4 + sourceOffset]?.trim() ?? '';
+    const subcat = cols[5 + sourceOffset]?.trim();
+    const tag = cols[6 + sourceOffset]?.trim() ?? '';
+    const amtStr = cols[7 + sourceOffset]?.trim();
+    const diffStr = cols[9 + sourceOffset]?.trim() ?? '';
+    const diffYtdStr = cols[10 + sourceOffset]?.trim() ?? '';
 
     const yearNum = year == null ? NaN : parseInt(String(year).replace(/\.0+$/, ''), 10);
     // Keep current FY + prior FY (for vs Last Year). Difference MoM uses current FY.
