@@ -32,6 +32,8 @@ const useDataCtx = () => useContext(DataCtx);
 const EMPTY_DATA = {
   MONTHLY: { 'Before Elim': [], 'After Elim': [] },
   MONTHLY_VARIANTS: {},
+  ANNUAL: { 'Before Elim': [], 'After Elim': [] },
+  ANNUAL_VARIANTS: {},
   SEGMENT_MONTHLY: {},
   SEGMENT_VARIANTS: {},
   SEGMENT_PERFORMANCE: [],
@@ -1061,7 +1063,19 @@ function DashboardInner() {
   const filteredMonthly = useMemo(() => filterMonthly(sourceMonthly, filter), [sourceMonthly, filter]);
   const filteredKeys = useMemo(() => new Set(filteredMonthly.map(m => `${m.year}-${m.month}`)), [filteredMonthly]);
 
-  const kpis = useMemo(() => computePeriodKPIs(filteredMonthly, kpiFields), [filteredMonthly, kpiFields]);
+  // Unfiltered Consolidated view = FY. Its headline figures come from the sheet's FY rows
+  // (Segment "Consolidated" / Sub-Segment "Dashboard"), not from summing January–December.
+  const isFyView = filter.quarter === 'all' && filter.months.length === 0;
+  const annualMonthly = useMemo(() => {
+    if (page !== 'consolidated' || !isFyView) return null;
+    const series = pickVariantSeries(activeData.ANNUAL, activeData.ANNUAL_VARIANTS);
+    return series?.length ? series : null;
+  }, [page, isFyView, activeData, pickVariantSeries]);
+
+  const kpis = useMemo(
+    () => computePeriodKPIs(annualMonthly ?? filteredMonthly, kpiFields),
+    [annualMonthly, filteredMonthly, kpiFields],
+  );
   const vsPeriodIndicator = useMemo(
     () => computeVsPeriodIndicator(sourceMonthly, filteredMonthly, filter, selectedMonthNums, kpiFields),
     [sourceMonthly, filteredMonthly, filter, selectedMonthNums, kpiFields],
@@ -1277,7 +1291,7 @@ function DashboardInner() {
       const segOrder = ['Retail', 'Mitra', 'Gaming', 'Investment', 'Corporate'];
       const mainLines = isCorporate
         ? (bundle?.bySegment?.Corporate ?? bundle?.lines ?? [])
-        : (bundle?.lines ?? []);
+        : (isFyView && bundle?.annualLines?.length ? bundle.annualLines : (bundle?.lines ?? []));
       const cols = [
         { key: '_main', label: isCorporate ? 'Corporate' : 'Consolidated', lines: mainLines },
         ...segOrder.map(seg => ({
@@ -1344,7 +1358,7 @@ function DashboardInner() {
       } : null,
     };
   }, [
-    activeData, page, effectiveCategory, filter, selectedMonthNums,
+    activeData, page, effectiveCategory, filter, selectedMonthNums, isFyView,
     isCorporate, isSegmentPage, useDashboardScope, subSegmentsSelected, filteredKeys,
     pnlGaVariant, subPnlPage,
   ]);
