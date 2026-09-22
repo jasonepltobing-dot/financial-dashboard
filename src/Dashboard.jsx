@@ -250,7 +250,7 @@ function computePeriodKPIs(filtered, fields) {
     out[f.key] = sumField(filtered, f.actual);
     out[`vsBudget_${f.key}`] = sumField(filtered, f.vsBudget);
     out[`vsYtd_${f.key}`] = last ? (last[f.ytd] ?? null) : null;
-    // vs Last Year: Σ(2026 − 2025) for filtered months
+    // vs Last Year: Σ(this year − last year) for filtered months, same scope
     out[`vsYoy_${f.key}`] = sumNullable(filtered, f.yoy);
   }
   return out;
@@ -1375,9 +1375,7 @@ function DashboardInner() {
           <div className="min-w-0">
             <p className="text-[11px] uppercase tracking-widest text-[var(--text-very-faint)] mb-1">Executive Dashboard</p>
             <h1 className="text-2xl font-semibold tracking-tight text-[var(--text-primary)] truncate">{pageTitle}</h1>
-            {isSegmentPage && (
-              <p className="text-[var(--text-faint)] text-sm mt-1">FY {fyYear}</p>
-            )}
+            <p className="text-[var(--text-faint)] text-sm mt-1">FY {fyYear}</p>
           </div>
         </div>
         <div className="flex items-center gap-2.5 flex-wrap">

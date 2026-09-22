@@ -1,14 +1,16 @@
 // Processes CSV text → dashboard data shape.
 // Rules:
-// - Consolidated / segment "all": Sub-Segment = "Dashboard"
+// - Consolidated page: Segment = "Consolidated" AND Sub-Segment = "Dashboard"
 // - Category filter: Before Elim / After Elim (Dashboard rows)
+// - vs Last Year: same scope (segment + sub-segment + category + subcategory) one year back
 // - Adj. EBITDA / Adj. EBIT Before Elim use Direct/Total subcategories
 // - Tag priority (non-Budget): Run-rate > Pre-closing > Actual > Forecast
 // - Budget rows used only for variance calculations
-// - Only year 2026
+// - FY follows the latest year present in the sheet
 
 export const SEGMENTS = ['Retail', 'Mitra', 'Gaming', 'Investment', 'Corporate'];
 export const DASHBOARD_SUB_SEGMENT = 'Dashboard';
+export const CONSOLIDATED_SEGMENT = 'Consolidated';
 export const DATA_YEAR = 2026;
 export const PRIOR_YEAR = 2025;
 export const CATEGORIES = ['Before Elim', 'After Elim'];
@@ -170,6 +172,10 @@ function monthMeta(year, month) {
   };
 }
 
+function isConsolidatedSegment(segment) {
+  return String(segment || '').trim().toLowerCase() === CONSOLIDATED_SEGMENT.toLowerCase();
+}
+
 function matchesScope(r, scope) {
   const {
     mode = 'consolidated',
@@ -178,12 +184,16 @@ function matchesScope(r, scope) {
     subSegments = null,
     category = null,
     requireCategory = false,
+    consolidatedSegment = null,
   } = scope;
 
   if (requireCategory && category && r.category !== category) return false;
 
   if (mode === 'consolidated') {
-    return r.subSegment === DASHBOARD_SUB_SEGMENT;
+    if (r.subSegment !== DASHBOARD_SUB_SEGMENT) return false;
+    // Sheets that carry an explicit "Consolidated" segment are read from that segment only;
+    // older sheets without it keep the legacy behaviour of summing every segment's Dashboard.
+    return consolidatedSegment ? isConsolidatedSegment(r.segment) : true;
   }
   if (mode === 'segment-dashboard') {
     return r.segment === segment && r.subSegment === DASHBOARD_SUB_SEGMENT;
@@ -220,14 +230,15 @@ function emptyBucket(year, month, metrics) {
   return bucket;
 }
 
-function sumMetricAmount(rows, year, month, subcat, scope) {
-  const scopeNoCat = { ...scope, requireCategory: scope.requireCategory === true, category: scope.category };
-  for (const candidate of budgetSubcatCandidates(subcat)) {
+function sumMetricAmount(rows, year, month, subcat, scope, { allowSubcatFallback = false } = {}) {
+  const scoped = { ...scope, requireCategory: scope.requireCategory === true, category: scope.category };
+  const candidates = allowSubcatFallback ? budgetSubcatCandidates(subcat) : [subcat];
+  for (const candidate of candidates) {
     let total = 0;
     let found = false;
     for (const r of rows) {
       if (r.year !== year || r.month !== month || r.subcat !== candidate) continue;
-      if (!matchesScope(r, scopeNoCat)) continue;
+      if (!matchesScope(r, scoped)) continue;
       total += r.amount;
       found = true;
     }
@@ -243,6 +254,7 @@ function sumMetricAmount(rows, year, month, subcat, scope) {
 function finalizeMonthlyMomYoy(monthly, priorRows, scope, {
   metrics = ['Revenue', 'EBITDA', 'Net Income'],
   metricSubcats = null,
+  priorYear = PRIOR_YEAR,
 } = {}) {
   const subcatOf = (metric) => {
     if (metricSubcats?.[metric]) return metricSubcats[metric];
@@ -264,7 +276,11 @@ function finalizeMonthlyMomYoy(monthly, priorRows, scope, {
         row[def.diff] = Math.round(row[def.field] - prev[def.field]);
       }
 
-      const priorAmt = sumMetricAmount(priorRows, PRIOR_YEAR, row.month, subcat, scope);
+      // vs Last Year = this year − last year, same Segment / Sub-Segment / Category / month
+      let priorAmt = sumMetricAmount(priorRows, priorYear, row.month, subcat, scope);
+      if (priorAmt == null) {
+        priorAmt = sumMetricAmount(priorRows, priorYear, row.month, subcat, scope, { allowSubcatFallback: true });
+      }
       row[def.yoy] = priorAmt != null
         ? Math.round(row[def.field] - priorAmt)
         : null;
@@ -282,6 +298,7 @@ function aggregateMonthly(primaryRows, budgetRows, scope, {
   metrics = ['Revenue', 'EBITDA', 'Net Income'],
   metricSubcats = null,
   priorRows = [],
+  priorYear = PRIOR_YEAR,
 } = {}) {
   const resolvedMetrics = metrics.map((m) => (m === 'EBITDA' || m === 'EBIT' ? m : m));
   const subcatOf = (metric) => {
@@ -373,6 +390,7 @@ function aggregateMonthly(primaryRows, budgetRows, scope, {
   return finalizeMonthlyMomYoy(monthly, priorRows, scope, {
     metrics: resolvedMetrics,
     metricSubcats,
+    priorYear,
   });
 }
 
@@ -761,12 +779,12 @@ function applyGaTotalAsDirectPlusShared(lines) {
   return lines;
 }
 
-function buildPnLBundle(pnlRows, primaryRows, category) {
+function buildPnLBundle(pnlRows, primaryRows, category, consolidatedSegment = null) {
   const mainLines = category === 'After Elim' ? PNL_MAIN_LINES_AFTER : PNL_MAIN_LINES_BEFORE;
 
   const consolidated = applyGaTotalAsDirectPlusShared(aggregatePnLTree(
     pnlRows,
-    { mode: 'consolidated' },
+    { mode: 'consolidated', consolidatedSegment },
     category,
     mainLines,
   ));
@@ -855,6 +873,9 @@ function mergeMonthlySeries(seriesList) {
         existing[d.budget] = (existing[d.budget] || 0) + (row[d.budget] || 0);
         existing[d.diff] = (existing[d.diff] || 0) + (row[d.diff] || 0);
         existing[d.vsBudget] = (existing[d.vsBudget] || 0) + (row[d.vsBudget] || 0);
+        if (row[d.yoy] != null || existing[d.yoy] != null) {
+          existing[d.yoy] = (existing[d.yoy] || 0) + (row[d.yoy] || 0);
+        }
       }
     }
   }
@@ -866,7 +887,17 @@ export function processCSV(csvText) {
   const years = [...new Set(parsedRows.map((r) => r.year))].sort((a, b) => a - b);
   if (years.length === 0) throw new Error('No data rows found in the spreadsheet');
 
-  const dataYear = years.includes(DATA_YEAR) ? DATA_YEAR : years[years.length - 1];
+  const isConsolidatedDashboardRow = (r) => isConsolidatedSegment(r.segment)
+    && r.subSegment === DASHBOARD_SUB_SEGMENT;
+  const consolidatedSegment = parsedRows.some(isConsolidatedDashboardRow) ? CONSOLIDATED_SEGMENT : null;
+
+  // FY follows the sheet: use the newest year that carries Consolidated/Dashboard rows.
+  const consolidatedYears = consolidatedSegment
+    ? [...new Set(parsedRows.filter(isConsolidatedDashboardRow).map((r) => r.year))].sort((a, b) => a - b)
+    : [];
+  const dataYear = consolidatedYears.length
+    ? consolidatedYears[consolidatedYears.length - 1]
+    : (years.includes(DATA_YEAR) ? DATA_YEAR : years[years.length - 1]);
   const priorYear = dataYear - 1;
   const rowsCurrent = parsedRows.filter((r) => r.year === dataYear);
   const rowsPrior = parsedRows.filter((r) => r.year === priorYear);
@@ -882,18 +913,21 @@ export function processCSV(csvText) {
       metrics: FULL_METRICS,
       metricSubcats: dashboardMetricSubcats(category, ebitdaVariant, ebitVariant, FULL_METRICS),
       priorRows,
+      priorYear,
     });
 
-  // Consolidated: default Before Elim Adj. EBITDA uses Total (no Direct/Total UI on consolidated)
+  // Consolidated: Segment "Consolidated" + Sub-Segment "Dashboard", split by Before/After Elim.
+  // Before Elim Adj. EBITDA uses Total (no Direct/Total UI on consolidated).
+  const consolidatedScope = { mode: 'consolidated', consolidatedSegment };
   const MONTHLY = {
-    'Before Elim': buildDashboardMonthly({ mode: 'consolidated' }, 'Before Elim', 'Adj. EBITDA (Total)'),
-    'After Elim': buildDashboardMonthly({ mode: 'consolidated' }, 'After Elim'),
+    'Before Elim': buildDashboardMonthly(consolidatedScope, 'Before Elim', 'Adj. EBITDA (Total)'),
+    'After Elim': buildDashboardMonthly(consolidatedScope, 'After Elim'),
   };
 
   const MONTHLY_VARIANTS = {
     'Before Elim': {
-      'Adj. EBITDA (Direct)': buildDashboardMonthly({ mode: 'consolidated' }, 'Before Elim', 'Adj. EBITDA (Direct)'),
-      'Adj. EBITDA (Total)': buildDashboardMonthly({ mode: 'consolidated' }, 'Before Elim', 'Adj. EBITDA (Total)'),
+      'Adj. EBITDA (Direct)': buildDashboardMonthly(consolidatedScope, 'Before Elim', 'Adj. EBITDA (Direct)'),
+      'Adj. EBITDA (Total)': buildDashboardMonthly(consolidatedScope, 'Before Elim', 'Adj. EBITDA (Total)'),
     },
   };
 
@@ -913,11 +947,13 @@ export function processCSV(csvText) {
           metrics: FULL_METRICS,
           metricSubcats: dashboardMetricSubcats('Before Elim', 'Adj. EBITDA (Direct)', 'Adj. EBIT (Direct)', FULL_METRICS),
           priorRows,
+          priorYear,
         }),
         'Adj. EBIT (Total)': aggregateMonthly(primaryRows, budgetRows, { ...scope, category: 'Before Elim', requireCategory: true }, {
           metrics: FULL_METRICS,
           metricSubcats: dashboardMetricSubcats('Before Elim', 'Adj. EBITDA (Total)', 'Adj. EBIT (Total)', FULL_METRICS),
           priorRows,
+          priorYear,
         }),
       },
     };
@@ -940,7 +976,7 @@ export function processCSV(csvText) {
         primaryRows,
         budgetRows,
         { mode: 'segment-total', segment: seg },
-        { metrics: SUBSEGMENT_METRICS, metricSubcats: SUBSEGMENT_SUBCATS, priorRows },
+        { metrics: SUBSEGMENT_METRICS, metricSubcats: SUBSEGMENT_SUBCATS, priorRows, priorYear },
       ),
     };
     for (const sub of SUB_SEGMENTS[seg]) {
@@ -948,14 +984,14 @@ export function processCSV(csvText) {
         primaryRows,
         budgetRows,
         { mode: 'subsegment', segment: seg, subSegment: sub },
-        { metrics: SUBSEGMENT_METRICS, metricSubcats: SUBSEGMENT_SUBCATS, priorRows },
+        { metrics: SUBSEGMENT_METRICS, metricSubcats: SUBSEGMENT_SUBCATS, priorRows, priorYear },
       );
     }
   }
 
   const PNL = {
-    'Before Elim': buildPnLBundle(pnlSourceRows, primaryRows, 'Before Elim'),
-    'After Elim': buildPnLBundle(pnlSourceRows, primaryRows, 'After Elim'),
+    'Before Elim': buildPnLBundle(pnlSourceRows, primaryRows, 'Before Elim', consolidatedSegment),
+    'After Elim': buildPnLBundle(pnlSourceRows, primaryRows, 'After Elim', consolidatedSegment),
   };
 
   // Flat compatibility shape used by older UI snippets (segment dashboard totals)
@@ -973,8 +1009,9 @@ export function processCSV(csvText) {
   }
 
   // Test / partial sheets often have no Dashboard / Before Elim rows.
-  // Fall back to summing available sub-segment metrics as-is.
-  if (!monthlyHasFigures(MONTHLY['Before Elim'])) {
+  // Fall back to summing available sub-segment metrics as-is. Sheets that do carry an explicit
+  // Consolidated segment are left untouched — their figures must come from that segment only.
+  if (!consolidatedSegment && !monthlyHasFigures(MONTHLY['Before Elim'])) {
     const fallback = mergeMonthlySeries(SEGMENTS.map((seg) => SUBSEGMENT_MONTHLY[seg]?._all));
     MONTHLY['Before Elim'] = fallback;
     if (!monthlyHasFigures(MONTHLY['After Elim'])) MONTHLY['After Elim'] = fallback;
